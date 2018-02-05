@@ -1,0 +1,385 @@
+#!/bin/bash
+CURRENT_INSTALL_DIR=IDIR;
+if [[ !($CURRENT_INSTALL_DIR == "IDIR") ]]; then
+	source $CURRENT_INSTALL_DIR/cli.conf
+fi
+in_args=$@
+user_info=""
+
+if [[ -d $TOKEN_DIR ]]; then
+    cd $TOKEN_DIR;
+else
+    mkdir -p $TOKEN_DIR;
+    cd $TOKEN_DIR;
+fi
+
+usage_warning() {
+  	
+	echo -e "
+	${BOLD}'fetch_token'${NONE} utility script generates user access/refresh tokens using the OAuth 2.0 'password' grant flow.
+        
+	${GREEN}Usage: fetch_token -u {USER_EMAIL}:{PASSWORD} -m {MFACODE} -p PASSCODE${NONE}
+        	
+    PRE REQUISITE:
+	Please export CLIENT's base64 encoded value, as CLIENT_AUTH variable e.g. ${BOLD} export CLIENT_AUTH=ZWRnZWNsaTplZGdlY2xpc2VjcmV0 ${NONE}
+        It's always better to set it in ${BOLD}.bash_profile${NONE} or ${BOLD}.bashsrc${NONE} instead of setting it every time.
+
+    If you use your company's credentials to login, please go to the URL below to get a one-time code to use instead of using your password.
+        One Time Code ( Get one at https://${sso_login_url}/passcode)
+
+	OPTIONAL:
+	fetch_token script uses https://login.apigee.com as the default SSO endpoint. If you want to hit another SSO end point you must set the 
+	SSO_LOGIN_URL environment variable using export
+
+ 	"
+  	exit 1
+}
+
+#Iterate over the fetch_token arguments
+while test $# -gt 0; do
+   case "$1" in
+          -h)
+              usage_warning
+              exit
+              ;;
+          -v)
+              echo -e "${LIGHT_BLUE}fetch_token: verbose mode ON\n${NONE}"
+              debug=1
+              ;;
+          -u)
+             if [ -n "$2" ]; then
+                user_info=$2
+             else
+                echo -e "${RED} -u requires a non-empty option argument. For usage details use help [-h]\n${NONE}"
+             fi
+             ;;
+          -m)
+             if [ -n "$2" ]; then
+                mfa_token=$2
+             fi
+             ;;
+          -p)
+             if [ -n "$2" ]; then
+                passcode=$2
+             fi
+             ;;
+
+    esac
+    shift
+done
+
+##################### Pseudo Code #####################
+#  1. Validate for SSO_URL and CLIENT_AUTH
+#  2. Sub string the user option from the command line options.
+#  3. Check for existence of password else prompt user to enter the password.
+#  4. Construct the query param for access token call
+#  5. Check for the ~/.sso-cli/$access_token_file file existence
+#     5a) If file exists read the content
+#       5b) Check content is valid
+#           5c) valid -- make the original management call with access token in bearer header
+#           5d) Invalid
+#             5di) Invalid - use the refresh token to get new access token
+#           5e) Empty
+#             5ei)  Empty - get new access token
+#     5f) File not exists
+#             5fi)  Empty - get new access token
+#  6. Stripe out the user option
+#  7. make the original management call with new access token in bearer header#
+#
+#  	Usage
+#  	1) ./fetch_token http://10.224.192.11:8080/v1/o -u foobar@apigee.com:Apigee123 -v
+#                                                   `
+#  	2) ./fetch_token http://10.224.192.11:8080/v1/o -u foobar@apigee.com -v
+#
+#
+
+version_validation() {
+    CLIENT_VERSION=$cli_version
+    GET_SERVER_VERSION=`curl -i -H "accept:application/json" $SSO_LOGIN_URL/version  --silent`
+    if [[ $GET_SERVER_VERSION == *"HTTP/1.1 200 OK"* ]]
+    then
+        SERVER_VERSION=`echo $GET_SERVER_VERSION | sed -E 's/.*cliVersion\"\:\"([^\"]+)\".*/\1/'`
+
+        ##
+        # If cli been running without install read the version from conf file exists in the current directory.
+        ##
+        if [[ (-z "$CLIENT_VERSION") ]]; then
+            cli_conf_file="${CUR_DIR}/cli.conf"
+            if [ -f "$cli_conf_file" ]
+            then
+                CLI_CONF=`cat "${cli_conf_file}" | grep "cli_version="`
+                if [[ ! -z "$CLI_CONF" ]]; then
+                    CLIENT_VERSION=`echo $CLI_CONF | cut -d "=" -f2`
+                    if [[ $debug -eq 1 ]]; then
+                        echo -e "${LIGHT_BLUE}Client Cli version : $CLIENT_VERSION, from current directory ${NONE}\n"
+                    fi
+                fi
+            fi
+        fi
+        if [[ $debug -eq 1 ]]; then
+            echo -e "${LIGHT_BLUE}Client Cli version : $CLIENT_VERSION, Server Cli Version : $SERVER_VERSION ${NONE}\n"
+        fi
+        ##
+        # Validates the server cli version with client cli version, Client cli needs to be updated in case
+        #    client cli version is not there or lesser than the server cli version
+        #
+        ##
+        if [[ (-z "$CLIENT_VERSION")  ||  (("${SERVER_VERSION}" != "${CLIENT_VERSION}") && (( $(echo "$SERVER_VERSION > $CLIENT_VERSION" | bc -l) ))) ]] ;
+        then
+            echo -e "${RED}############# You have outdated version, Please refer the documentation to update to the latest version #############${NONE}";
+        fi
+    fi
+}
+
+user_validation() {
+    ######  2. Extract -u option and get username and password from the argument ######
+    if [ -z "$user_info" ]; then
+        echo "**Missing**: -u option. Please refer help [-h] for usage details.";
+        echo
+        exit 1
+    fi
+
+    arr=(`echo $user_info | tr ':' ' '`)
+    userName=${arr[0]}
+    password=${arr[1]}
+
+    #echo "userName : $userName, password: $password"
+    ###### 3. Check for existence of password else prompt user to enter the password. ######
+    if [ -z "$password" ]; then
+        echo "Enter the password for user '$userName'"
+        read -s password
+    fi
+
+    ###### 4. Construct the query param data to get the access token ######
+
+    qp_username='username='$userName
+    qp_password='password='$password
+
+    ###### 5. stripping off -u value from the in_args ######
+    newargs=`echo $in_args | sed 's/-u[^-]*//g'`
+}
+
+mfa_validation() {
+    re="[0-9]+"
+    if [[ "$mfa_token" == "-p" || "$mfa_token" == "-v" ]]; then
+      mfa_token=`echo $mfa_token | sed 's/-p[^-]*//g' | sed 's/-v[^-]*//g'`
+    fi
+    if [[ !(-z "$mfa_token") && (!($mfa_token =~ $re) || !(${#mfa_token} == 6)) ]]; then
+       echo "**Invalid mfa code**";
+       echo
+       exit 1
+    fi
+}
+
+passcode_validation() {
+    passcode_regex="[^0-9A-Za-z]+"
+    if [[ "$passcode" == "-m" || "$passcode" == "-v" ]]; then
+      passcode=`echo $passcode | sed 's/-m[^-]*//g' | sed 's/-v[^-]*//g'`
+    fi
+    if [[ !(-z "$passcode") && (("$passcode" =~ $passcode_regex) || !(${#passcode} == 6)) ]]; then
+       echo "**Invalid passcode  : $passcode";
+       echo
+       exit 1
+    fi
+}
+
+get_sso_server() {
+	if [ -z "$SSO_LOGIN_URL" ]; then
+		export SSO_LOGIN_URL=https://login.apigee.com
+	fi
+    if [ -z "$mfa_token" ]; then
+		SSO_URL=$SSO_LOGIN_URL/oauth/token
+	else
+		SSO_URL=$SSO_LOGIN_URL/oauth/token'?mfa_token='$mfa_token
+	fi
+	if [[ ($SSO_LOGIN_URL == *".login.apigee.com"*) || ($SSO_LOGIN_URL == *".login.e2e.apigee.net"*) || ($SSO_LOGIN_URL == *".localhost:8080"*) ]]
+    then
+        if [[ $debug -eq 1 ]]; then
+            echo -e "${BOLD}${LIGHT_BLUE}Zone based sso login url is been set${NONE}"
+        fi
+        has_saml_enabled=true
+    fi
+	return 1
+}
+
+get_new_access_token() {
+
+    if [[ (${has_saml_enabled}) && (-z "$passcode") ]]; then
+        echo -e "${RED}Please enter the passcode${NONE}"
+        exit -1
+    elif [[ !(${has_saml_enabled}) && (-z "$userName")]]; then
+        echo -e "${RED}Please enter the user credential information ${NONE}"
+        exit -1
+    fi
+
+    passcode=`echo $passcode | sed 's/ //g'`
+    qp_grantType='grant_type=password'
+    if [[ -z "$passcode" || (${#passcode} == 0)]]; then
+    	ACCESS_TOKEN_CONTENT=`curl -s -d "$qp_grantType" --data-urlencode "$qp_username" --data-urlencode "$qp_password" $SSO_URL --header "Content-Type: application/x-www-form-urlencoded;charset=utf-8" -H "accept: application/json;charset=utf-8" -H "authorization: Basic $CLIENT_AUTH" --silent`
+    else
+        qp_responseType='response_type=token'
+        qp_passcode='passcode='$passcode
+        ACCESS_TOKEN_CONTENT=`curl -s -d "$qp_grantType" -d "qp_responseType" -d "$qp_passcode" $SSO_URL --header "Content-Type: application/x-www-form-urlencoded;charset=utf-8" -H "accept: application/json;charset=utf-8" -H "authorization: Basic $CLIENT_AUTH" --silent`
+    fi
+
+	if [[ $ACCESS_TOKEN_CONTENT == *"access_token"* ]]
+    then
+        	echo "$ACCESS_TOKEN_CONTENT" > "$access_token_file"
+        	NEW_ACCESS_TOKEN=`echo $ACCESS_TOKEN_CONTENT | sed -E 's/.*access_token\"\:\"([^\"]+)\".*/\1/'`
+
+		if [[ $debug -eq 1 ]]; then
+        		echo -e "${LIGHT_BLUE}Brand new access token : $NEW_ACCESS_TOKEN${NONE}\n"
+		fi
+
+        	VALID_TOKEN=$NEW_ACCESS_TOKEN
+    	else
+		    echo $ACCESS_TOKEN_CONTENT;
+    	fi
+}
+
+generate_token() {
+
+        CUR_DIR=`pwd`
+        get_sso_server
+        version_validation
+
+        if [[ $debug -eq 1 ]]; then
+            echo -e "${BOLD}${LIGHT_BLUE}Current working dir: ${CUR_DIR}${NONE}"
+        fi
+
+    	if [ -z "$CLIENT_AUTH" ]; then
+        	export CLIENT_AUTH=ZWRnZWNsaTplZGdlY2xpc2VjcmV0
+    	fi
+
+    	# Step 2 to 5 is user_Validation function
+
+    	###### 6. Get the existing accessToken, if it's not there get new one. ######
+    	#  if the access_token file exists
+    	#    read the exiting token and make a call with existing token.
+    	#    if existing token is expired
+    	#        make a call to get the new access_token and write it to the file
+    	#        make a call with new access_token
+    	#  else
+    	#    make a call to get the new access_token and write it to the file
+    	#    make a call with new access_token
+    	#
+    	#
+    	#
+    
+    	access_token_file="access_token.dat"
+    	file="$access_token_file"
+
+    	if [ -f "$file" ]
+    	then
+        	ACCESS_TOKEN_CONTENT=`cat $access_token_file`
+
+        	if [[ -z "$ACCESS_TOKEN_CONTENT" ]]; then
+
+                if [[ !(${has_saml_enabled}) ]]; then
+                    user_validation
+                    mfa_validation
+                else
+                    passcode_validation
+                fi
+
+            	# Get sso_server_url
+	        	get_sso_server
+	        	returnValue=$?
+            	if [[ returnValue -eq 1 ]]; then
+                    # generating brand new token
+            		get_new_access_token
+	        	fi
+        	else
+            	# if file exists with access_token value
+            	EXISTING_ACCESS_TOKEN=`echo $ACCESS_TOKEN_CONTENT | sed -E 's/.*access_token\"\:\"([^\"]+)\".*/\1/'`
+
+            	ACTUAL_TOKEN=`echo $EXISTING_ACCESS_TOKEN | cut -d'.' -f2`
+            	#echo "Actual Token $ACTUAL_TOKEN"
+
+            	JSON=`echo $ACTUAL_TOKEN | base64 -D`
+            	#echo $JSON
+
+            	USER_EMAIL=`echo $JSON | sed -E 's/.*email\"\:\"([^\"]+)\",.*/\1/'`
+
+            	if [[ $debug -eq 1 ]]; then
+                    echo -e "${LIGHT_BLUE}Given user : $userName, Existing user :  $USER_EMAIL${NONE}\n"
+                fi
+
+
+                if [[ $debug -eq 1 ]]; then
+	    	        echo -e "${LIGHT_BLUE} User's access token already exists : $EXISTING_ACCESS_TOKEN${NONE}\n"
+	            fi
+
+                EXPIRES_ON=`echo $JSON | sed -E 's/.*exp\"\:([^\"]+)\,.*/\1/'`
+
+                #ISSUED_AT=`echo $JSON | sed -E 's/.*iat\"\:([^\"]+)\,.*/\1/'`
+
+                CURRENT_DATE=`date "+%s"`
+
+                #echo "Current time is : $CURRENT_DATE and token expires by : $EXPIRES_ON"
+
+                EXISTING_ACCESS_TOKEN=`echo $ACCESS_TOKEN_CONTENT | sed -E 's/.*access_token\"\:\"([^\"]+)\".*/\1/'`
+
+                if [ `expr $CURRENT_DATE - $EXPIRES_ON` -gt 0 ]
+                then
+                    REFRESH_TOKEN=`echo $ACCESS_TOKEN_CONTENT | sed -E 's/.*refresh_token\"\:\"([^\"]+)\".*/\1/'`
+                    if [[ $debug -eq 1 ]]; then
+                        echo -e "${LIGHT_BLUE}Access token is expired, Use the refresh token to get new token${NONE}\n"
+                    fi
+
+                    # Get sso_server_url
+                    get_sso_server
+                    returnValue=$?
+                    if [[ returnValue -eq 1 ]]; then
+                    	ACCESS_TOKEN_CONTENT=`curl -s -i -H "content-type:application/x-www-form-urlencoded;charset=utf-8" -H "accept: application/json;charset=utf-8" -H "authorization: Basic $CLIENT_AUTH" $SSO_URL -d "grant_type=refresh_token&refresh_token=$REFRESH_TOKEN"`
+                    	if [[ $ACCESS_TOKEN_CONTENT == *"HTTP/1.1 200 OK"* ]]
+                        then
+                        	echo "$ACCESS_TOKEN_CONTENT" > "$access_token_file"
+                            NEW_ACCESS_TOKEN=`echo $ACCESS_TOKEN_CONTENT | sed -E 's/.*access_token\"\:\"([^\"]+)\".*/\1/'`
+                            if [[ $debug -eq 1 ]]; then
+                                echo -e "${LIGHT_BLUE}Got the new access token using refresh token${NONE}\n"
+                            fi
+                            VALID_TOKEN=$NEW_ACCESS_TOKEN
+                        else
+                            if [[ $debug -eq 1 ]]; then
+                            	echo -e "${LIGHT_BLUE}Refresh token has expired, Getting brand new access token${NONE}\n"
+                            fi
+                            if [[ !(${has_saml_enabled}) ]]; then
+                                user_validation
+                                mfa_validation
+                            else
+                                passcode_validation
+                            fi
+                            # generating brand new token
+                            get_new_access_token
+                        fi
+                    fi
+                else
+                    if [[ $debug -eq 1 ]]; then
+                        echo -e "${LIGHT_BLUE}Existing access token is still valid${NONE}\n"
+                    fi
+                    VALID_TOKEN=$EXISTING_ACCESS_TOKEN
+                fi
+        	fi
+    	else
+        	if [[ !(${has_saml_enabled}) ]]; then
+                user_validation
+                mfa_validation
+            else
+                passcode_validation
+            fi
+            # Get sso_server_url
+    		get_sso_server
+	    	returnValue=$?
+	    	if [[ returnValue -eq 1 ]]; then
+        		# generating brand new token
+        		get_new_access_token
+        	fi
+    	fi
+
+    	if [ ! -z "$VALID_TOKEN" ]; then
+        	echo "$VALID_TOKEN" > "valid_token.dat"
+    	fi
+}
+
+generate_token

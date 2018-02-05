@@ -1,0 +1,65 @@
+#!/bin/bash
+
+usage_warning() {
+
+  echo "
+  This script takes one argument
+  -b install directory path default location (~/usr/local/bin)
+
+  e.g. ./install.sh -b /usr/local/bin
+
+  "
+  exit 1
+
+}
+
+while getopts ":b:" opt; do
+  case $opt in
+    b)
+      INSTALL_DIR=$OPTARG
+      ;;
+    \?)
+      echo "Invalid option: -$OPTARG" >&2
+      usage_warning
+      ;;
+    :)
+      echo "Option -$OPTARG requires an argument." >&2
+      usage_warning
+      ;;
+  esac
+done
+
+if [ -z "$INSTALL_DIR" ]; then
+   INSTALL_DIR="/usr/local/bin"
+fi
+
+if [ ! -d "$INSTALL_DIR" ]; then
+	echo "$INSTALL_DIR directory does not exist!"
+	exit -1
+fi
+
+CUR_DIR=`pwd`
+echo "Current working dir: ${CUR_DIR}"
+
+cp "${CUR_DIR}/cli.conf" "$INSTALL_DIR"
+
+cp "${CUR_DIR}/acurl" "$INSTALL_DIR"
+chmod a+w "$INSTALL_DIR/acurl"
+
+cp "${CUR_DIR}/fetch_token" "$INSTALL_DIR"
+chmod a+w "$INSTALL_DIR/fetch_token"
+
+cp "${CUR_DIR}/get_token" "$INSTALL_DIR"
+chmod a+w "$INSTALL_DIR/get_token"
+
+sed -i -e "s,=IDIR,=$INSTALL_DIR,1" $INSTALL_DIR/cli.conf
+sed -i -e "s,=IDIR,=$INSTALL_DIR,1" $INSTALL_DIR/acurl
+sed -i -e "s,=IDIR,=$INSTALL_DIR,1" $INSTALL_DIR/fetch_token
+sed -i -e "s,=IDIR,=$INSTALL_DIR,1" $INSTALL_DIR/get_token
+
+
+echo " Installed under :  $INSTALL_DIR"
+echo " Successfully installed the sso-cli..."
+
+
+

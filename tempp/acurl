@@ -1,0 +1,76 @@
+#!/bin/bash
+
+CURRENT_INSTALL_DIR=IDIR;
+if [[ !($CURRENT_INSTALL_DIR == "IDIR") ]]; then
+        source $CURRENT_INSTALL_DIR/cli.conf
+fi
+
+# Collect all the command line arguments
+in_args=$@
+
+# Store the token in $HOME/.sso-cli directory
+
+if [[ !(-z $TOKEN_DIR) ]]; then
+  mkdir -p $TOKEN_DIR;
+  cd $TOKEN_DIR;
+fi
+
+CUR_DIR=`pwd`
+#echo -e "${BOLD}${LIGHT_BLUE}Current working dir: ${CUR_DIR}${NONE}"
+
+usage_warning(){
+  echo -e "${BOLD} 'acurl'${NONE} is an extension to the 'curl' command-line utility allowing the ${UNDERLINE}user to make regular management api calls configured with HTTP ${BOLD}Bearer ${UNDERLINE}Authentication token.${NONE} acurl uses OAuth 2.0 'password' grant_type and fetches the Bearer tokens by exchanging the Basic authentication credentials.
+	       
+  ${GREEN}Usage: acurl MANAGEMENT_URL -u USERNAME:PASSWORD -m MFACODE${NONE} -p PASSCODE${NONE}
+  example: 1) acurl http://10.224.192.11:8080/v1/o -u foobar@apigee.com:Apigee123 -m 123456 -p P0En9F -v
+  example: 2) acurl http://10.224.192.11:8080/v1/o -u foobar@apigee.com -m 123456 -p P0En9F -v
+      
+  ${BOLD}PRE REQUISITE:${NONE}
+  ${RED}Please export CLIENT's base64 encoded value, as CLIENT_AUTH variable e.g. ${BOLD}export CLIENT_AUTH=ZWRnZWNsaTplZGdlY2xpc2VjcmV0 ${NONE}
+  It's always better to set it in ${BOLD}.bash_profile${NONE} or ${BOLD}.bashsrc${NONE} instead of setting it every time.
+
+  If you use your company's credentials to login, please go to the URL below to get a one-time code to use instead of using your password.
+     One Time Code ( Get one at https://${sso_login_url}/passcode)
+
+  ${BOLD}OPTIONAL:${NONE}
+  acurl uses https://login.apigee.com as the default SSO endpoint. If you want to hit another SSO end point you must set the SSO_LOGIN_URL environment variable using export.
+       
+  ${BOLD}Note:${NONE}
+  Tokens will be generated and stored locally under \$HOME/.sso-cli
+  "
+}
+
+#Iterate over the acurl arguments
+while test $# -gt 0; do
+  while getopts 'u:m:p:X:vh' option; do
+     case "$option" in
+       h) 
+	 usage_warning 
+	 exit
+	 ;;
+       ?)
+	 ;;
+     esac
+  done
+  shift
+done
+
+###### 5. Getting the access token ######
+#Remove the -h (help) option before sending to fetch_token function
+in_args=`echo $in_args | sed 's/-h[^-]*//g'`
+
+if [[ -z $INSTALL_DIR ]]; then
+	./fetch_token $in_args
+else 
+	. $INSTALL_DIR/fetch_token $in_args
+fi
+
+if [ -f "valid_token.dat" ]
+then
+    VALID_ACCESS_TOKEN=`cat valid_token.dat`
+    ###### 6. stripping off -u value from the in_args ######
+    new_args=`echo $in_args | sed 's/-u[^-]*//g' | sed 's/-m[^-].......//g' | sed 's/-p[^-]*//g'`
+
+    ###### 8. Original management call with valid access token
+    curl $new_args -H "Authorization: Bearer $VALID_ACCESS_TOKEN"
+fi

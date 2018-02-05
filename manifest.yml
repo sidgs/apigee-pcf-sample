@@ -1,0 +1,8 @@
+---
+applications:
+- name: test-hello-1
+  memory: 128M
+  instances: 1
+  host: test-hello-1
+  path: .
+  buildpack: nodejs_buildpack
